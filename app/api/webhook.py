@@ -21,6 +21,7 @@ from app.dto.telegram import InputNormalizedDTO
 from app.services.pipeline import process_message
 from app.services.events import log_event
 from app.services.prompts import SYSTEM_PROMPT
+from app.services.billing import check_limits
 from app.api.middleware import SubscriptionMiddleware
 
 logger = logging.getLogger(__name__)
@@ -74,54 +75,7 @@ def _split_for_telegram(text: str, limit: int = TG_MSG_LIMIT) -> list[str]:
         for i, chunk in enumerate(chunks)
     ]
 
-async def _check_limits(db, user: User) -> tuple:
-    """Check if user is allowed to create new entry.
-    Returns (allowed: bool, used: int, limit: int).
-    Admins have no limits."""
-    # Admins bypass overall limits
-    if user.role == "admin":
-        return (True, 0, 0)
-
-    # 1. Check active subscription
-    stmt_sub = select(Subscription).where(
-        Subscription.user_id == user.id,
-        Subscription.status.in_(['active', 'trial'])
-    )
-    has_sub = (await db.execute(stmt_sub)).scalar_one_or_none()
-    
-    if has_sub:
-        return (True, 0, 0)
-
-    # 3. Check TOTAL usage
-    from sqlalchemy import func
-    from app.db.models import UsageDaily
-    
-    stmt_usage = select(
-        func.sum(UsageDaily.entries_count),
-        func.sum(UsageDaily.stt_seconds)
-    ).where(UsageDaily.user_id == user.id)
-    
-    row = (await db.execute(stmt_usage)).first()
-    total_entries = row[0] or 0
-    total_stt = row[1] or 0
-
-    # Default limits
-    limit_entries = 5
-    limit_stt = 600
-    
-    # Override from user settings if present
-    if user.limit_overrides and isinstance(user.limit_overrides, dict):
-        limit_entries = int(user.limit_overrides.get("entries_count", limit_entries))
-        limit_stt = int(user.limit_overrides.get("stt_seconds", limit_stt))
-        
-    # Check
-    if total_entries >= limit_entries:
-        return (False, total_entries, limit_entries)
-    
-    if total_stt >= limit_stt:
-        return (False, int(total_stt / 60), int(limit_stt / 60)) # Return minutes for STT message context
-        
-    return (True, total_entries, limit_entries)
+# Local _check_limits was removed; using centralized logic from app.services.billing.
 
 # ── Keyboards ───────────────────────────────────────────────
 
@@ -532,9 +486,11 @@ async def handle_voice(message: Message) -> None:
              await processing_msg.edit_text("⛔ Ваш аккаунт отключен. Обратитесь к администратору @NeuroAlexD.")
              return
 
-        allowed, used, limit = await _check_limits(db, user)
+        limit_chk = await check_limits(db, user)
+        allowed = limit_chk["allowed"]
+
         if not allowed:
-             await processing_msg.edit_text(f'🔒 <b>Лимит исчерпан!</b>\n\nВы использовали {used} из {limit} записей сегодня.\nЧтобы продолжить, напишите администратору @NeuroAlexD.', parse_mode="HTML")
+             await processing_msg.edit_text(f'🔒 <b>Лимит исчерпан!</b>\n\n{limit_chk["reason"]}\nЧтобы продолжить, напишите администратору @NeuroAlexD.', parse_mode="HTML")
              return
 
         if duration > settings.MAX_VOICE_DURATION_SECONDS and user.role != "admin":
@@ -668,9 +624,10 @@ async def handle_text(message: Message) -> None:
              await processing_msg.edit_text("⛔ Ваш аккаунт отключен. Обратитесь к администратору @NeuroAlexD.")
              return
 
-        allowed, used, limit = await _check_limits(db, user)
+        limit_chk = await check_limits(db, user)
+        allowed = limit_chk["allowed"]
         if not allowed:
-             await processing_msg.edit_text(f'🔒 <b>Лимит исчерпан!</b>\n\nВы использовали {used} из {limit} записей сегодня.\nЧтобы продолжить, напишите администратору @NeuroAlexD.', parse_mode="HTML")
+             await processing_msg.edit_text(f'🔒 <b>Лимит исчерпан!</b>\n\n{limit_chk["reason"]}\nЧтобы продолжить, напишите администратору @NeuroAlexD.', parse_mode="HTML")
              return
 
         if await _is_duplicate(db, message):

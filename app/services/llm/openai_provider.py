@@ -39,13 +39,8 @@ class OpenAIProvider(BaseLLMProvider):
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
             )
-        finally:
-            if original_key is not None:
-                os.environ["OPENAI_API_KEY"] = original_key
-            elif "OPENAI_API_KEY" in os.environ:
-                del os.environ["OPENAI_API_KEY"]
-
-        text = response.choices[0].message.content or ""
+            
+            text = response.choices[0].message.content or ""
             usage = response.usage
 
             tokens_in = usage.prompt_tokens if usage else 0
@@ -73,3 +68,8 @@ class OpenAIProvider(BaseLLMProvider):
                 error_code="openai_error",
                 error_message=str(e),
             )
+        finally:
+            if original_key is not None:
+                os.environ["OPENAI_API_KEY"] = original_key
+            elif "OPENAI_API_KEY" in os.environ:
+                del os.environ["OPENAI_API_KEY"]

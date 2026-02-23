@@ -38,8 +38,6 @@ class AssemblyAIProvider(BaseSTTProvider):
         try:
             result = await asyncio.to_thread(self._sync_transcribe, request)
             return result
-        finally:
-            aai.settings.api_key = original_key
         except Exception as e:
             logger.exception("AssemblyAI transcription failed")
             return STTResultDTO(
@@ -49,6 +47,8 @@ class AssemblyAIProvider(BaseSTTProvider):
                 error_code="transcription_failed",
                 error_message=str(e),
             )
+        finally:
+            aai.settings.api_key = original_key
 
     def _sync_transcribe(self, request: STTRequestDTO) -> STTResultDTO:
         config = aai.TranscriptionConfig(

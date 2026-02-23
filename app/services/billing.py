@@ -59,11 +59,11 @@ async def check_limits(db: AsyncSession, user: User) -> dict:
         }
         plan_name = "trial_default"
 
-    # Get TOTAL usage (sum across all days)
+    # Get TODAY's usage only
     usage_q = select(
         func.sum(UsageDaily.entries_count),
         func.sum(UsageDaily.stt_seconds)
-    ).where(UsageDaily.user_id == user_id)
+    ).where(UsageDaily.user_id == user_id, UsageDaily.date == today)
     
     row = (await db.execute(usage_q)).first()
     total_entries = row[0] or 0

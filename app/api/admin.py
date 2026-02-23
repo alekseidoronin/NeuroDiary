@@ -16,7 +16,8 @@ from app.services.events import log_event
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import func, select, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-from aiogram.types import MenuButtonWebApp, WebAppInfo
+from aiogram import Bot
+from aiogram.types import MenuButtonWebApp, MenuButtonCommands, WebAppInfo
 
 from app.api.auth import get_admin_user
 from app.db.engine import get_db
@@ -236,6 +237,8 @@ async def list_users(
             "status": u.status,
             "locale": u.locale,
             "timezone": u.timezone,
+            "balance": float(u.balance or 0),
+            "created_at": u.first_seen_at.isoformat() if u.first_seen_at else None,
             "first_seen_at": u.first_seen_at.isoformat() if u.first_seen_at else None,
             "last_seen_at": u.last_seen_at.isoformat() if u.last_seen_at else None,
         }
@@ -344,7 +347,8 @@ async def get_user(
         UsageDaily.date,
         UsageDaily.entries_count,
         UsageDaily.stt_seconds,
-        UsageDaily.tokens_total
+        UsageDaily.tokens_in,
+        UsageDaily.tokens_out
     ).where(
         UsageDaily.user_id == user_id,
         UsageDaily.date >= history_start
@@ -363,7 +367,7 @@ async def get_user(
                 "date": d.strftime("%Y-%m-%d"),
                 "entries": row.entries_count,
                 "stt_seconds": float(row.stt_seconds or 0),
-                "tokens": row.tokens_total
+                "tokens": (row.tokens_in or 0) + (row.tokens_out or 0)
             })
         else:
             history_data.append({
@@ -387,7 +391,8 @@ async def get_user(
             "first_seen_at": user.first_seen_at.isoformat() if user.first_seen_at else None,
             "balance": float(user.balance or 0),
             "limit_overrides": user.limit_overrides,
-            "total_cost_usd": total_cost_usd, 
+            "weekly_summary_enabled": user.weekly_summary_enabled,
+            "total_cost_usd": total_cost_usd,
         },
         "usage_today": {
             "entries": total_entries,
@@ -403,6 +408,7 @@ async def get_user(
             }
             for e in events
         ],
+        "activity_history": history_data,
     }
 
 
@@ -420,7 +426,7 @@ async def update_user(
 
     # Update fields if present
     role_changed = False
-    for field in ["status", "role", "username", "first_name", "locale", "timezone", "custom_system_prompt"]:
+    for field in ["status", "role", "username", "first_name", "locale", "timezone", "custom_system_prompt", "weekly_summary_enabled"]:
         if field in data:
             if field == "role" and data[field] != user.role:
                 role_changed = True

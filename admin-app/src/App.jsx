@@ -948,7 +948,7 @@ function EventsPage({ onBack }) {
 function SettingsPage({ onBack }) {
     const [sttProvider, setSttProvider] = useState('assemblyai')
     const [provider, setProvider] = useState('gemini')
-    const [model, setModel] = useState('gemini-1.5-flash')
+    const [model, setModel] = useState('gemini-2.0-flash')
     const [assemblyKey, setAssemblyKey] = useState('')
     const [openaiKey, setOpenaiKey] = useState('')
     const [geminiKey, setGeminiKey] = useState('')

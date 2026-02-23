@@ -42,8 +42,10 @@ class DynamicSettings:
                 value = decrypt_value(obj.encrypted_value)
             else:
                 value = obj.value
-            self._cache[key] = value
-            return value
+            # Only use DB value if it's non-empty; otherwise fall through to .env
+            if value:
+                self._cache[key] = value
+                return value
 
         # 3. Fallback to .env (Settings class)
         # Convert lowercase key to uppercase for env lookup

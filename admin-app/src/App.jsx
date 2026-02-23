@@ -1405,12 +1405,12 @@ function LimitsModal({ userId, initialLimits, onClose, onDone }) {
                 <form onSubmit={handleSub}>
                     <div className="input-group">
                         <label>Лимит записей (всего)</label>
-                        <input className="input" type="number" placeholder="По умолчанию: 5" value={limits.entries_count || ''} onChange={(e) => setLimits({ ...limits, entries_count: parseInt(e.target.value) })} />
+                        <input className="input" type="number" placeholder="По умолчанию: 5" value={limits.entries_count ?? ''} onChange={(e) => setLimits({ ...limits, entries_count: e.target.value === '' ? '' : parseInt(e.target.value) })} />
                     </div>
                     <div className="input-group">
                         <label>Лимит STT (секунд всего)</label>
                         <div style={{ fontSize: 12, color: '#888', marginBottom: 5 }}>600 сек = 10 мин. По умолчанию: 600</div>
-                        <input className="input" type="number" placeholder="По умолчанию: 600" value={limits.stt_seconds || ''} onChange={(e) => setLimits({ ...limits, stt_seconds: parseInt(e.target.value) })} />
+                        <input className="input" type="number" placeholder="По умолчанию: 600" value={limits.stt_seconds ?? ''} onChange={(e) => setLimits({ ...limits, stt_seconds: e.target.value === '' ? '' : parseInt(e.target.value) })} />
                     </div>
                     <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
                         <button type="submit" className="btn btn-primary" disabled={loading}>Сохранить</button>

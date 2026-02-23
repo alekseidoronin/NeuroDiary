@@ -45,26 +45,29 @@ class SubscriptionMiddleware(BaseMiddleware):
         if isinstance(event, CallbackQuery) and event.data == "check_sub":
             return await handler(event, data)
             
-        # Skip check for admins
-        if user.id in settings.admin_user_ids:
-             return await handler(event, data)
-
-        # 1. Check DB Status (Priority: Ban > Subscription)
+        # 1. Check DB Status and Role
+        db_role = "user"
         try:
             async with async_session() as db:
-                result = await db.execute(select(User.status).where(User.tg_user_id == user.id))
-                db_status = result.scalar_one_or_none()
-
-                if db_status and str(db_status).lower() in ("blocked", "deleted"):
-                    msg = "⛔ Ваш доступ ограничен. Обратитесь к администратору @NeuroAlexD"
-                    if isinstance(event, Message):
-                        await event.answer(msg)
-                    elif isinstance(event, CallbackQuery):
-                        await event.answer(msg, show_alert=True)
-                    return
+                result = await db.execute(select(User.status, User.role).where(User.tg_user_id == user.id))
+                row = result.first()
+                if row:
+                    db_status, db_role = row
+                    if db_status and str(db_status).lower() in ("blocked", "deleted"):
+                        msg = "⛔ Ваш доступ ограничен. Обратитесь к администратору @NeuroAlexD"
+                        if isinstance(event, Message):
+                            await event.answer(msg)
+                        elif isinstance(event, CallbackQuery):
+                            await event.answer(msg, show_alert=True)
+                        return
         except Exception as e:
             logger.error(f"DB check error in middleware: {e}")
             return
+
+        # Skip sub check for admins (from DB or env)
+        if user.id in settings.admin_user_ids or db_role == "admin":
+             return await handler(event, data)
+
 
         # 2. Check subscription (with Redis cache)
         cache_key = f"sub_check:{user.id}"

@@ -1,0 +1,32 @@
+# ── Core ──────────────────────────────────────────────
+aiogram==3.15.0
+fastapi==0.115.8
+uvicorn==0.34.0
+pydantic-settings==2.8.1
+
+# ── Database (Postgres) ──────────────────────────────
+sqlalchemy[asyncio]==2.0.38
+asyncpg==0.30.0
+alembic==1.14.1
+
+# ── STT (AssemblyAI) ─────────────────────────────────
+assemblyai==0.37.0
+
+# ── LLM providers ───────────────────────────────────
+openai==1.68.0
+google-genai==1.5.0
+
+# ── HTTP client ──────────────────────────────────────
+httpx==0.28.1
+
+# ── Environment ──────────────────────────────────────
+python-dotenv==1.0.1
+
+# ── Encryption (for API keys in DB) ──────────────────
+cryptography==44.0.0
+
+# ── Redis (task queue — future) ──────────────────────
+redis==5.2.1
+# arq==0.26.1
+# arq==0.26.1
+apscheduler==3.10.4

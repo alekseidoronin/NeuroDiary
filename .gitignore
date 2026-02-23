@@ -1,0 +1,17 @@
+# diary-bot
+
+__pycache__/
+*.pyc
+*.pyo
+.env
+diary_bot.db
+*.ogg
+*.opus
+*.mp3
+.DS_Store
+venv/
+.venv/
+
+# Admin Mini App
+admin-app/node_modules/
+admin-app/dist/

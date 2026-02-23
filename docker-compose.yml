@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL ────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: diary
+      POSTGRES_PASSWORD: diary
+      POSTGRES_DB: diarybot
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U diary -d diarybot" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+
+  # ── Redis ─────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+
+  # ── Bot ──────────────────────────────────────────
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./app:/app/app
+      - ./admin-app/dist:/app/admin-app/dist
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - default
+      - n8n_net
+    ports:
+      - "8000:8000" # Expose port for direct access (debugging)
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=n8n_default" # Explicitly specify network for Traefik
+      - "traefik.http.routers.diary-bot.rule=Host(`diary.144.217.12.20.nip.io`)"
+      - "traefik.http.routers.diary-bot.entrypoints=websecure"
+      - "traefik.http.routers.diary-bot.tls=true"
+      - "traefik.http.routers.diary-bot.tls.certresolver=mytlschallenge"
+      - "traefik.http.services.diary-bot.loadbalancer.server.port=8000"
+    command: python -m app.main polling
+
+volumes:
+  pgdata:
+
+
+networks:
+  default:
+  n8n_net:
+    external: true
+    name: n8n_default

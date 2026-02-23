@@ -1,0 +1,349 @@
+/* ── DiaryCode Admin — Modern Dashboard Theme ─────────────────── */
+
+:root {
+  /* Palette inspired by modern dashboards */
+  --primary: #344767;
+  /* Deep Blue/Gray for text */
+  --secondary: #7b809a;
+  /* Muted text */
+  --bg-body: #f0f2f5;
+  /* Light gray background */
+  --bg-card: #ffffff;
+  --bg-sidebar: #1a1f37;
+  /* Dark Sidebar Background */
+
+  /* Accents */
+  --accent: #cb0c9f;
+  /* Magenta/Purple for primary actions */
+  --accent-gradient: linear-gradient(310deg, #7928ca, #ff0080);
+  --success: #82d616;
+  --success-gradient: linear-gradient(310deg, #17ad37, #98ec2d);
+  --info: #17c1e8;
+  --info-gradient: linear-gradient(310deg, #2152ff, #21d4fd);
+  --warning: #fbcf33;
+  --error: #ea0606;
+
+  /* Typography */
+  --font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* Shapes */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+
+  /* Shadows */
+  --shadow-card: 0 20px 27px 0 rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--bg-body);
+  color: var(--primary);
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+
+/* ── Layout & Typography ──────────────────────────────── */
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: var(--primary);
+  margin-bottom: 0.5rem;
+  font-weight: 700;
+}
+
+.page-title {
+  font-size: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.app {
+  display: flex;
+  min-height: 100vh;
+}
+
+/* Sidebar (Desktop) */
+.sidebar {
+  display: none;
+  width: 250px;
+  background: var(--bg-sidebar);
+  color: #fff;
+  flex-direction: column;
+  padding: 1rem;
+  position: fixed;
+  height: 100vh;
+  overflow-y: auto;
+  z-index: 50;
+  border-radius: 0 20px 20px 0;
+}
+
+.sidebar-header {
+  font-size: 1.25rem;
+  font-weight: 700;
+  padding: 1rem 0;
+  text-align: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 1rem;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  color: rgba(255, 255, 255, 0.7);
+  text-decoration: none;
+  transition: all 0.2s;
+  cursor: pointer;
+}
+
+.sidebar-link:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.sidebar-link.active {
+  background: var(--accent-gradient);
+  color: #fff;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+}
+
+/* Mobile Content Wrapper */
+.content {
+  flex: 1;
+  padding: 1rem;
+  padding-bottom: 90px;
+  /* Space for bottom nav */
+  width: 100%;
+}
+
+@media (min-width: 768px) {
+  .sidebar {
+    display: flex;
+  }
+
+  .content {
+    margin-left: 260px;
+    /* Sidebar width + gap */
+    padding-bottom: 2rem;
+  }
+
+  .bottom-nav {
+    display: none !important;
+  }
+}
+
+/* ── Components ──────────────────────────────────────── */
+
+.card {
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  box-shadow: var(--shadow-card);
+  margin-bottom: 1.5rem;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.2s;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.card-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.card-subtitle {
+  font-size: 0.875rem;
+  color: var(--secondary);
+}
+
+.card-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Stats Grid */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+/* Inputs & Forms */
+.input {
+  width: 100%;
+  padding: 10px 15px;
+  border: 1px solid #e2e8f0;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  font-family: inherit;
+  transition: border 0.2s, box-shadow 0.2s;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(203, 12, 159, 0.1);
+}
+
+.btn {
+  padding: 10px 24px;
+  border-radius: var(--radius-sm);
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.1s;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-primary {
+  background: var(--accent-gradient);
+  color: #fff;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.btn-secondary {
+  background: #fff;
+  color: var(--primary);
+  border: 1px solid #e2e8f0;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+/* Bottom Nav (Mobile) */
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+  display: flex;
+  justify-content: space-around;
+  padding: 10px 0 max(10px, env(safe-area-inset-bottom));
+  z-index: 100;
+  box-shadow: 0 -5px 20px rgba(0, 0, 0, 0.05);
+}
+
+.nav-item {
+  color: var(--secondary);
+  background: none;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.nav-item.active {
+  color: var(--accent);
+}
+
+.nav-item.active svg {
+  fill: currentColor;
+  opacity: 0.1;
+}
+
+/* Utilities */
+.text-gradient {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.badge {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #fff;
+}
+
+.badge-success {
+  background: var(--success-gradient);
+}
+
+.badge-error {
+  background: linear-gradient(310deg, #ea0606, #ff667c);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+.page {
+  animation: fadeIn 0.3s ease-in-out;
+}
+/* Clickable Table Rows */
+tr.clickable {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+tr.clickable:hover {
+  background-color: rgba(0, 0, 0, 0.03);
+}
+
+.hover-icon {
+  opacity: 0;
+  transform: translateX(-5px);
+  transition: all 0.2s ease;
+  padding-left: 8px;
+  color: var(--secondary);
+  display: block; /* Ensure it takes space or affects layout if needed, but flex handles it */
+}
+
+tr.clickable:hover .hover-icon {
+  opacity: 1;
+  transform: translateX(0);
+}

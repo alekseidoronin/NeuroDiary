@@ -20,6 +20,9 @@ venv/
 diary_export.html
 admin-app/dist.tar.gz
 
+# Local diary import payload (personal data)
+scripts/dev/data/import_payload.txt
+
 # Admin Mini App
 admin-app/node_modules/
 admin-app/dist/

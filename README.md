@@ -81,11 +81,18 @@ diary-bot/
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.js
-├── docker-compose.yml          # Postgres + Redis
+├── docker-compose.yml          # Postgres + Redis + bot
+├── scripts/
+│   ├── dev/                    # Разовые скрипты (импорт/экспорт, диагностика)
+│   └── backup/                 # pg_backup.sh — дамп PostgreSQL
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
+
+## Резервное копирование PostgreSQL
+
+Данные дневника живут в PostgreSQL (том Docker `pgdata`). Экспорт из бота (`/export`) — это не полный бэкап БД. Для продакшена настройте периодический **`pg_dump`** на сервере: готовый пример — [`scripts/backup/pg_backup.sh`](scripts/backup/pg_backup.sh) и описание в [`scripts/backup/README.md`](scripts/backup/README.md). Храните файлы дампов так же надёжно, как саму базу.
 
 ## 🚀 Быстрый старт
 

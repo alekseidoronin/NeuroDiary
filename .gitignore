@@ -12,6 +12,14 @@ diary_bot.db
 venv/
 .venv/
 
+# Logs & test cache
+*.log
+.pytest_cache/
+
+# One-off exports / build artifacts (do not commit)
+diary_export.html
+admin-app/dist.tar.gz
+
 # Admin Mini App
 admin-app/node_modules/
 admin-app/dist/

@@ -68,6 +68,7 @@ export const api = {
     updateProviders: (data) => request('/settings/providers', { method: 'POST', body: JSON.stringify(data) }),
     updateSecrets: (data) => request('/settings/secrets', { method: 'POST', body: JSON.stringify(data) }),
     updatePrompts: (data) => request('/settings/prompts', { method: 'POST', body: JSON.stringify(data) }),
+    testKey: (provider, key) => request('/settings/test-key', { method: 'POST', body: JSON.stringify({ provider, key }) }),
 
     // Plans
     getPlans: () => request('/plans'),

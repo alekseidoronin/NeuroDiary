@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
                 BotCommand(command="start", description="🏠 Главное меню"),
                 BotCommand(command="settings", description="⚙️ Настройки"),
                 BotCommand(command="help", description="❓ Помощь"),
+                BotCommand(command="tts", description="🔊 Озвучить последнюю запись"),
             ])
             asyncio.create_task(dp.start_polling(bot, drop_pending_updates=True))
             logger.info("Bot polling started in background")
@@ -104,6 +105,10 @@ app.add_middleware(
 
 # Admin API
 app.include_router(admin_router)
+
+# WebApp Editor API
+from app.api.webapp import router as webapp_router
+app.include_router(webapp_router)
 
 import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

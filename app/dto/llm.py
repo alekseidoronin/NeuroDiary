@@ -18,7 +18,7 @@ class LLMRequestDTO(BaseModel):
     user_prompt: str
     variables: Dict[str, Any] = {}
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = 8192
 
 
 class LLMResultDTO(BaseModel):

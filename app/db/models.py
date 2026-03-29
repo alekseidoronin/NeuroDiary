@@ -243,3 +243,24 @@ class AffiliateRecord(Base):
     user = relationship("User", foreign_keys=[user_id], back_populates="affiliate_records")
     referral = relationship("User", foreign_keys=[referral_id])
 
+
+# ── Long-term Memory ─────────────────────────────────────────
+
+class UserFact(Base):
+    __tablename__ = "user_facts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    fact_key = Column(String(100), nullable=False)
+    fact_value = Column(Text, nullable=False)
+    confidence = Column(Numeric(3, 2), server_default=text("0.70"))
+    source_entry_id = Column(UUID(as_uuid=True), ForeignKey("journal_entries.id"), nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "fact_key", name="uq_user_fact_key"),
+        Index("idx_user_facts_user_seen", "user_id", "last_seen_at"),
+    )
+

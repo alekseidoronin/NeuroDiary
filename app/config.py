@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     def webhook_url(self) -> str:
         return f"{self.WEBHOOK_HOST}{self.WEBHOOK_PATH}"
 
+    @property
+    def public_base_url(self) -> str:
+        if self.WEBHOOK_HOST:
+            return self.WEBHOOK_HOST
+        if self.MINI_APP_URL:
+            import urllib.parse
+            parsed = urllib.parse.urlparse(self.MINI_APP_URL)
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return "https://diary.144.217.12.20.nip.io"
+
     # ── Database (Postgres) ──────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://diary:diary@localhost:5432/diarybot"
 
@@ -54,7 +64,10 @@ class Settings(BaseSettings):
 
     # ── LLM tuning ──────────────────────────────────────────
     LLM_TEMPERATURE: float = 0.7
-    LLM_MAX_TOKENS: int = 4096
+    # Single-call output budget; continuation rounds add more if model hits the cap.
+    LLM_MAX_TOKENS: int = 8192
+    # DB/admin may set llm_max_tokens lower — we never go below this for diary generation.
+    LLM_OUTPUT_TOKEN_FLOOR: int = 8192
 
     # ── Voice limits ─────────────────────────────────────────
     MAX_VOICE_DURATION_SECONDS: int = 300

@@ -591,6 +591,12 @@ function UserDetailsPage({ userId, onBack }) {
     )
 
     const u = data.user
+    const effectiveLimits = u.effective_limits || {}
+    const entriesLimitRaw = effectiveLimits.entries_per_day ?? u.limit_overrides?.entries_per_day ?? u.limit_overrides?.entries_count ?? 5
+    const sttLimitRaw = effectiveLimits.stt_seconds_per_day ?? u.limit_overrides?.stt_seconds_per_day ?? u.limit_overrides?.stt_seconds ?? 600
+    const entriesLimitView = entriesLimitRaw === -1 ? '∞' : entriesLimitRaw
+    const sttLimitView = sttLimitRaw === -1 ? '∞' : `${sttLimitRaw}c`
+    const limitsSourceView = effectiveLimits.source || 'plan_or_default'
 
     const handleUpdateUser = async (patch) => {
         try {
@@ -748,11 +754,12 @@ function UserDetailsPage({ userId, onBack }) {
                         <div style={{ marginTop: 20 }}>
                             <div className="section-title">Общая статистика</div>
                             <div className="stats-grid">
-                                <div><b>Записи:</b> {data.usage_today.entries} / {u.limit_overrides?.entries_count || 5}</div>
-                                <div><b>STT:</b> {data.usage_today.stt_seconds}c ({Math.round(data.usage_today.stt_seconds / 60)}м) / {u.limit_overrides?.stt_seconds || 600}c</div>
+                                <div><b>Записи (день):</b> {data.usage_today.entries} / {entriesLimitView}</div>
+                                <div><b>STT (день):</b> {data.usage_today.stt_seconds}c ({Math.round(data.usage_today.stt_seconds / 60)}м) / {sttLimitView}</div>
                                 <div><b>Токены In:</b> {data.usage_today.tokens_in}</div>
                                 <div><b>Токены Out:</b> {data.usage_today.tokens_out}</div>
                                 <div><b>Расходы:</b> {u.total_cost_usd !== undefined ? `$${u.total_cost_usd}` : '—'}</div>
+                                <div><b>Источник лимитов:</b> {limitsSourceView === 'user_override' ? 'Пользовательские' : 'План/дефолт'}</div>
                             </div>
 
                             {data.history && (
@@ -945,20 +952,109 @@ function EventsPage({ onBack }) {
 
 // ── Settings Page ───────────────────────────────────────────
 
+function KeyInput({ label, providerName, savedStatus, onSave }) {
+    const [value, setValue] = useState('')
+    const [show, setShow] = useState(false)
+    const [testing, setTesting] = useState(false)
+    const [testResult, setTestResult] = useState(null)
+    const [saving, setSaving] = useState(false)
+
+    const handleSave = async () => {
+        if (!value.trim()) return
+        setSaving(true)
+        setTestResult(null)
+        try {
+            await onSave(value.trim())
+            setValue('')
+            setTestResult({ ok: true, msg: 'Ключ сохранён' })
+        } catch (e) {
+            setTestResult({ ok: false, msg: e.message })
+        }
+        setSaving(false)
+    }
+
+    const handleTest = async () => {
+        const keyToTest = value.trim()
+        if (!keyToTest) return
+        setTesting(true)
+        setTestResult(null)
+        try {
+            const res = await api.testKey(providerName, keyToTest)
+            if (res.status === 'ok') {
+                setTestResult({ ok: true, msg: `Ключ рабочий${res.model ? ' · ' + res.model : ''}` })
+            } else {
+                setTestResult({ ok: false, msg: res.error || 'Ошибка' })
+            }
+        } catch (e) {
+            setTestResult({ ok: false, msg: e.message })
+        }
+        setTesting(false)
+    }
+
+    const statusColor = savedStatus === 'saved' ? '#22c55e' : savedStatus === 'default' ? '#f59e0b' : '#6b7280'
+    const statusText = savedStatus === 'saved' ? '✓ Сохранён в БД' : savedStatus === 'default' ? '⚠ Из .env (не в БД)' : '✗ Не задан'
+
+    return (
+        <div className="input-group" style={{ marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <label style={{ marginBottom: 0 }}>{label}</label>
+                <span style={{ fontSize: 11, color: statusColor, fontWeight: 600 }}>{statusText}</span>
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+                <input
+                    className="input"
+                    type={show ? 'text' : 'password'}
+                    value={value}
+                    onChange={e => { setValue(e.target.value); setTestResult(null) }}
+                    placeholder="Введите новый ключ..."
+                    style={{ flex: 1, fontFamily: show ? 'monospace' : undefined }}
+                />
+                <button
+                    className="btn btn-secondary"
+                    onClick={() => setShow(s => !s)}
+                    style={{ padding: '8px 10px', minWidth: 36 }}
+                    title={show ? 'Скрыть' : 'Показать'}
+                >{show ? '🙈' : '👁'}</button>
+            </div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <button
+                    className="btn btn-secondary"
+                    onClick={handleTest}
+                    disabled={!value.trim() || testing}
+                    style={{ flex: 1, fontSize: 12 }}
+                >{testing ? 'Проверяю...' : '🔍 Проверить'}</button>
+                <button
+                    className="btn btn-primary"
+                    onClick={handleSave}
+                    disabled={!value.trim() || saving}
+                    style={{ flex: 1, fontSize: 12 }}
+                >{saving ? 'Сохраняю...' : '💾 Сохранить'}</button>
+            </div>
+            {testResult && (
+                <div style={{
+                    marginTop: 6, padding: '6px 10px', borderRadius: 6, fontSize: 12,
+                    background: testResult.ok ? '#dcfce7' : '#fee2e2',
+                    color: testResult.ok ? '#166534' : '#991b1b'
+                }}>
+                    {testResult.ok ? '✓ ' : '✗ '}{testResult.msg}
+                </div>
+            )}
+        </div>
+    )
+}
+
 function SettingsPage({ onBack }) {
     const [sttProvider, setSttProvider] = useState('assemblyai')
     const [provider, setProvider] = useState('gemini')
-    const [model, setModel] = useState('gemini-2.0-flash')
-    const [assemblyKey, setAssemblyKey] = useState('')
-    const [openaiKey, setOpenaiKey] = useState('')
-    const [geminiKey, setGeminiKey] = useState('')
+    const [model, setModel] = useState('gemini-2.0-flash-lite')
     const [entriesLimit, setEntriesLimit] = useState('5')
     const [sttLimit, setSttLimit] = useState('300')
     const [temp, setTemp] = useState('0.7')
-    const [maxTokens, setMaxTokens] = useState('4096')
+    const [maxTokens, setMaxTokens] = useState('8192')
     const [systemPrompt, setSystemPrompt] = useState('')
     const [userTemplate, setUserTemplate] = useState('')
     const [repairPrompt, setRepairPrompt] = useState('')
+    const [keyStatuses, setKeyStatuses] = useState({ assemblyai: 'unknown', gemini: 'unknown', openai: 'unknown' })
     const [toast, setToast] = useState(null)
     const [loading, setLoading] = useState(false)
 
@@ -973,17 +1069,30 @@ function SettingsPage({ onBack }) {
             if (s.trial_stt_seconds_per_day) setSttLimit(s.trial_stt_seconds_per_day.value)
             if (s.llm_temperature) setTemp(s.llm_temperature.value)
             if (s.llm_max_tokens) setMaxTokens(s.llm_max_tokens.value)
-            // We don't set keys as they are masked
             if (s.system_prompt) setSystemPrompt(s.system_prompt.value)
             if (s.user_template) setUserTemplate(s.user_template.value)
             if (s.repair_prompt) setRepairPrompt(s.repair_prompt.value)
+            // Determine key statuses from backend response
+            setKeyStatuses({
+                assemblyai: s.assemblyai_api_key?.is_default ? 'default' : (s.assemblyai_api_key ? 'saved' : 'unknown'),
+                gemini: s.gemini_api_key?.is_default ? 'default' : (s.gemini_api_key ? 'saved' : 'unknown'),
+                openai: s.openai_api_key?.is_default ? 'default' : (s.openai_api_key ? 'saved' : 'unknown'),
+            })
         })
     }, [])
+
+    const saveKey = async (keyName, providerLabel) => async (value) => {
+        const data = {}
+        data[keyName] = value
+        await api.updateSecrets(data)
+        setKeyStatuses(prev => ({ ...prev, [providerLabel]: 'saved' }))
+        showToast(`Ключ ${providerLabel} сохранён в БД`)
+    }
 
     const saveProviders = async () => {
         setLoading(true)
         try {
-            await api.updateProviders({
+            const res = await api.updateProviders({
                 stt_provider: sttProvider,
                 llm_provider: provider,
                 llm_model: model,
@@ -992,23 +1101,7 @@ function SettingsPage({ onBack }) {
                 llm_temperature: temp,
                 llm_max_tokens: maxTokens
             })
-            showToast('Провайдеры обновлены!')
-        } catch (e) { showToast(e.message, 'error') }
-        setLoading(false)
-    }
-
-    const saveSecrets = async () => {
-        setLoading(true)
-        try {
-            const data = {}
-            if (assemblyKey) data.assemblyai_api_key = assemblyKey
-            if (openaiKey) data.openai_api_key = openaiKey
-            if (geminiKey) data.gemini_api_key = geminiKey
-            await api.updateSecrets(data)
-            showToast('Ключи сохранены!')
-            setAssemblyKey('')
-            setOpenaiKey('')
-            setGeminiKey('')
+            showToast(`Провайдеры обновлены (${Object.keys(res.applied || {}).length} полей).`)
         } catch (e) { showToast(e.message, 'error') }
         setLoading(false)
     }
@@ -1016,12 +1109,12 @@ function SettingsPage({ onBack }) {
     const savePrompts = async () => {
         setLoading(true)
         try {
-            await api.updatePrompts({
+            const res = await api.updatePrompts({
                 system_prompt: systemPrompt,
                 user_template: userTemplate,
                 repair_prompt: repairPrompt
             })
-            showToast('Промты обновлены!')
+            showToast(`Промпты обновлены (${(res.updated || []).length}).`)
         } catch (e) { showToast(e.message, 'error') }
         setLoading(false)
     }
@@ -1090,24 +1183,28 @@ function SettingsPage({ onBack }) {
             {/* API Keys */}
             <div className="card">
                 <div className="card-title">🔑 API ключи</div>
-                <div className="input-group">
-                    <label>AssemblyAI API Key</label>
-                    <input className="input" type="password" value={assemblyKey}
-                        onChange={(e) => setAssemblyKey(e.target.value)} placeholder="Новый ключ..." />
-                </div>
-                <div className="input-group">
-                    <label>OpenAI API Key</label>
-                    <input className="input" type="password" value={openaiKey}
-                        onChange={(e) => setOpenaiKey(e.target.value)} placeholder="Новый ключ..." />
-                </div>
-                <div className="input-group">
-                    <label>Gemini API Key</label>
-                    <input className="input" type="password" value={geminiKey}
-                        onChange={(e) => setGeminiKey(e.target.value)} placeholder="Новый ключ..." />
-                </div>
-                <button className="btn btn-primary" onClick={saveSecrets} disabled={loading}>
-                    Сохранить ключи
-                </button>
+                <p style={{ fontSize: 12, color: '#6b7280', marginBottom: 16 }}>
+                    Каждый ключ сохраняется в базу данных в зашифрованном виде и сразу используется ботом.
+                    Нажмите «Проверить» перед сохранением, чтобы убедиться что ключ рабочий.
+                </p>
+                <KeyInput
+                    label="AssemblyAI API Key (STT)"
+                    providerName="assemblyai"
+                    savedStatus={keyStatuses.assemblyai}
+                    onSave={saveKey('assemblyai_api_key', 'assemblyai')}
+                />
+                <KeyInput
+                    label="Gemini API Key"
+                    providerName="gemini"
+                    savedStatus={keyStatuses.gemini}
+                    onSave={saveKey('gemini_api_key', 'gemini')}
+                />
+                <KeyInput
+                    label="OpenAI API Key"
+                    providerName="openai"
+                    savedStatus={keyStatuses.openai}
+                    onSave={saveKey('openai_api_key', 'openai')}
+                />
             </div>
 
             {/* Prompts */}
@@ -1384,14 +1481,21 @@ function TopupModal({ userId, isDeduct, onClose, onDone }) {
 }
 
 function LimitsModal({ userId, initialLimits, onClose, onDone }) {
-    const [limits, setLimits] = useState(initialLimits || {})
+    const [limits, setLimits] = useState({
+        entries_per_day: initialLimits?.entries_per_day ?? initialLimits?.entries_count ?? '',
+        stt_seconds_per_day: initialLimits?.stt_seconds_per_day ?? initialLimits?.stt_seconds ?? '',
+    })
     const [loading, setLoading] = useState(false)
 
     const handleSub = async (e) => {
         e.preventDefault()
         setLoading(true)
         try {
-            await api.updateUserLimits(userId, limits)
+            const payload = {
+                entries_per_day: limits.entries_per_day === '' ? null : Number(limits.entries_per_day),
+                stt_seconds_per_day: limits.stt_seconds_per_day === '' ? null : Number(limits.stt_seconds_per_day),
+            }
+            await api.updateUserLimits(userId, payload)
             onDone()
             onClose()
         } catch (err) { alert(err.message) }
@@ -1404,13 +1508,14 @@ function LimitsModal({ userId, initialLimits, onClose, onDone }) {
                 <div className="card-title">Лимиты пользователя</div>
                 <form onSubmit={handleSub}>
                     <div className="input-group">
-                        <label>Лимит записей (всего)</label>
-                        <input className="input" type="number" placeholder="По умолчанию: 5" value={limits.entries_count ?? ''} onChange={(e) => setLimits({ ...limits, entries_count: e.target.value === '' ? '' : parseInt(e.target.value) })} />
+                        <label>Лимит записей в день</label>
+                        <div style={{ fontSize: 12, color: '#888', marginBottom: 5 }}>Введите -1 для безлимита.</div>
+                        <input className="input" type="number" placeholder="По умолчанию: 5" value={limits.entries_per_day ?? ''} onChange={(e) => setLimits({ ...limits, entries_per_day: e.target.value })} />
                     </div>
                     <div className="input-group">
-                        <label>Лимит STT (секунд всего)</label>
-                        <div style={{ fontSize: 12, color: '#888', marginBottom: 5 }}>600 сек = 10 мин. По умолчанию: 600</div>
-                        <input className="input" type="number" placeholder="По умолчанию: 600" value={limits.stt_seconds ?? ''} onChange={(e) => setLimits({ ...limits, stt_seconds: e.target.value === '' ? '' : parseInt(e.target.value) })} />
+                        <label>Лимит STT секунд в день</label>
+                        <div style={{ fontSize: 12, color: '#888', marginBottom: 5 }}>600 сек = 10 мин. Введите -1 для безлимита.</div>
+                        <input className="input" type="number" placeholder="По умолчанию: 600" value={limits.stt_seconds_per_day ?? ''} onChange={(e) => setLimits({ ...limits, stt_seconds_per_day: e.target.value })} />
                     </div>
                     <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
                         <button type="submit" className="btn btn-primary" disabled={loading}>Сохранить</button>

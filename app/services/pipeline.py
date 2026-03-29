@@ -27,6 +27,12 @@ from app.services.prompts import SYSTEM_PROMPT, USER_TEMPLATE, REPAIR_PROMPT
 from app.services.validator import validate_format, is_clarification_question
 from app.services.events import log_event
 from app.services.billing import check_limits, increment_usage
+from app.services.memory import (
+    extract_facts_from_text,
+    format_facts_for_prompt,
+    get_user_facts,
+    upsert_user_facts,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +217,16 @@ async def process_message(
         "repair_attempted": validation.repair_attempted,
     })
 
+    await db.flush()
+
+    combined_for_memory = " ".join(
+        part for part in [inp.raw_text or "", raw_text or "", llm_text or ""] if part
+    )
+    facts = extract_facts_from_text(combined_for_memory)
+    await upsert_user_facts(db, user.id, facts, source_entry_id=entry.id)
+    if facts:
+        await log_event(db, "memory_updated", user.id, {"facts_count": len(facts)})
+
     await db.commit()
 
     return {"type": "entry", "text": llm_text, "entry_id": entry.id}
@@ -289,8 +305,24 @@ async def _run_llm(db, ds, request_id, user, raw_text, inp):
         raw_text=raw_text,
     )
 
+    facts = await get_user_facts(db, user.id, limit=15)
+    facts_context = format_facts_for_prompt(facts)
+    if facts_context:
+        user_prompt = (
+            "Контекст пользователя из прошлых записей:\n"
+            f"{facts_context}\n\n"
+            "Используй этот контекст только как справку, не выдумывай факты.\n\n"
+            f"{user_prompt}"
+        )
+
     temp = await ds.get("llm_temperature", settings.LLM_TEMPERATURE)
-    max_tokens = await ds.get("llm_max_tokens", settings.LLM_MAX_TOKENS)
+    raw_max = await ds.get("llm_max_tokens", settings.LLM_MAX_TOKENS)
+    try:
+        max_tokens = int(raw_max)
+    except (TypeError, ValueError):
+        max_tokens = settings.LLM_MAX_TOKENS
+    floor = getattr(settings, "LLM_OUTPUT_TOKEN_FLOOR", 8192)
+    max_tokens = max(floor, max_tokens)
 
     llm_req = LLMRequestDTO(
         request_id=request_id,
@@ -299,7 +331,7 @@ async def _run_llm(db, ds, request_id, user, raw_text, inp):
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         temperature=float(temp),
-        max_tokens=int(max_tokens),
+        max_tokens=max_tokens,
     )
 
     # Record provider job
@@ -359,7 +391,10 @@ async def _run_repair(db, ds, request_id, user, broken_text):
         system_prompt=repair_prompt,
         user_prompt=broken_text,
         temperature=0.2,
-        max_tokens=settings.LLM_MAX_TOKENS,
+        max_tokens=max(
+            getattr(settings, "LLM_OUTPUT_TOKEN_FLOOR", 8192),
+            settings.LLM_MAX_TOKENS,
+        ),
     )
 
     job = ProviderJob(

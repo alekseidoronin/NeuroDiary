@@ -5,10 +5,11 @@ Telegram webhook handler — receives update, normalises, runs pipeline.
 from __future__ import annotations
 
 import logging
+import time
 from uuid import uuid4
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, ContentType, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, ContentType, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -23,6 +24,10 @@ from app.services.events import log_event
 from app.services.prompts import SYSTEM_PROMPT
 from app.services.billing import check_limits
 from app.api.middleware import SubscriptionMiddleware
+from app.services.tts import synthesize
+from app.services.memory import get_last_entry_for_user
+from app.services.telegram_ui import build_entry_actions_kb
+from app.services.telegram_chunk import TG_MSG_LIMIT, split_for_telegram as _split_for_telegram
 
 logger = logging.getLogger(__name__)
 
@@ -35,45 +40,83 @@ from aiogram.fsm.state import State, StatesGroup
 class UserStates(StatesGroup):
     setting_time = State()
     setting_prompt = State()
-    editing_entry = State()
 
-TG_MSG_LIMIT = 4096
+_tts_click_guard: dict[str, float] = {}
 
-def _split_for_telegram(text: str, limit: int = TG_MSG_LIMIT) -> list[str]:
-    """Split a long text into Telegram-safe chunks, respecting line boundaries.
-    If there are multiple chunks, each gets a 'Часть X/N' header.
-    """
-    if len(text) <= limit:
-        return [text]
 
-    lines = text.split('\\n')
-    chunks: list[str] = []
-    current_chunk: list[str] = []
-    current_len = 0
-    # Reserve space for part header like '\\n\\n<i>Часть 1/3</i>'
-    header_reserve = 30
+async def _send_one_part(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    *,
+    parse_mode_first: bool = True,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Send one chunk; on HTML parse error retry as plain text."""
+    if parse_mode_first:
+        try:
+            await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+            return
+        except Exception as e:
+            logger.warning("HTML send failed, retrying plain: %s", e)
+    await bot.send_message(chat_id, text, reply_markup=reply_markup)
 
-    for line in lines:
-        line_len = len(line) + 1  # +1 for newline
-        if current_len + line_len > limit - header_reserve and current_chunk:
-            chunks.append('\\n'.join(current_chunk))
-            current_chunk = [line]
-            current_len = line_len
-        else:
-            current_chunk.append(line)
-            current_len += line_len
 
-    if current_chunk:
-        chunks.append('\\n'.join(current_chunk))
+async def deliver_diary_chunks_to_chat(
+    *,
+    parts: list[str],
+    reply_markup: InlineKeyboardMarkup | None = None,
+    processing_msg: Message | None = None,
+    bot: Bot | None = None,
+    chat_id: int | None = None,
+    edit_message_id: int | None = None,
+) -> None:
+    """Edit first bubble (or given message id) with parts[0], then send the rest.
+    Keyboard goes on the last part if multi-part, else on the first. All parts are sent."""
+    if not parts:
+        return
 
-    total = len(chunks)
-    if total <= 1:
-        return chunks
+    if processing_msg is not None:
+        bot = processing_msg.bot
+        chat_id = processing_msg.chat.id
+        edit_message_id = processing_msg.message_id
 
-    return [
-        f"{chunk}\\n\\n<i>Часть {i+1}/{total}</i>"
-        for i, chunk in enumerate(chunks)
-    ]
+    if bot is None or chat_id is None or edit_message_id is None:
+        raise ValueError("deliver_diary_chunks_to_chat: need processing_msg or (bot, chat_id, edit_message_id)")
+
+    n = len(parts)
+    kb_first = reply_markup if n == 1 else None
+    kb_last = reply_markup if n > 1 else None
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=edit_message_id,
+            text=parts[0],
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_first,
+        )
+    except Exception as e:
+        logger.warning("edit_message_text HTML failed: %s", e)
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=edit_message_id,
+                text=parts[0],
+                reply_markup=kb_first,
+            )
+        except Exception as e2:
+            logger.error("edit_message_text plain failed: %s", e2)
+            raise
+
+    for idx, part in enumerate(parts[1:]):
+        is_last = idx == len(parts) - 2
+        await _send_one_part(
+            bot,
+            chat_id,
+            part,
+            reply_markup=kb_last if is_last else None,
+        )
 
 # Local _check_limits was removed; using centralized logic from app.services.billing.
 
@@ -173,6 +216,7 @@ async def cmd_start(message: Message) -> None:
         BotCommand(command="start", description="🏠 Главное меню"),
         BotCommand(command="settings", description="⚙️ Настройки"),
         BotCommand(command="help", description="❓ Помощь"),
+        BotCommand(command="tts", description="🔊 Озвучить последнюю запись"),
     ])
     
     await message.answer(START_TEXT, parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -230,6 +274,72 @@ async def cb_memory_recall(call: CallbackQuery):
         )
         await call.message.answer(text, parse_mode=ParseMode.HTML)
         await call.answer()
+
+
+@router.message(Command("tts"))
+async def cmd_tts(message: Message) -> None:
+    async with async_session() as db:
+        user = await _ensure_user(db, message)
+        if user.status in ("blocked", "deleted"):
+            await message.answer("⛔ Ваш аккаунт отключен. Обратитесь к администратору @NeuroAlexD.")
+            return
+
+        entry = await get_last_entry_for_user(db, user.id)
+        if not entry or not entry.final_diary_text:
+            await message.answer("📭 Пока нечего озвучивать. Сначала отправь запись.")
+            return
+
+        try:
+            audio = await synthesize(entry.final_diary_text, "ru")
+            await message.answer_voice(
+                BufferedInputFile(audio, filename=f"entry-{entry.id}.mp3"),
+                caption="🔊 Озвучка последней записи",
+            )
+        except Exception as e:
+            logger.error("TTS /tts failed: %s", e, exc_info=True)
+            await message.answer("⚠️ Не удалось озвучить запись. Попробуйте позже.")
+
+
+@router.callback_query(F.data.startswith("tts:"))
+async def cb_tts_entry(call: CallbackQuery):
+    try:
+        _, entry_id = (call.data or "").split(":", 1)
+    except ValueError:
+        await call.answer("Некорректная команда.", show_alert=True)
+        return
+
+    # Ack callback quickly to reduce duplicate delivery/taps on slow TTS generation.
+    await call.answer("⏳ Готовлю озвучку...")
+
+    async with async_session() as db:
+        user = await _ensure_user(db, call)
+        guard_key = f"{user.id}:{entry_id}"
+        now = time.monotonic()
+        last_ts = _tts_click_guard.get(guard_key, 0.0)
+        if now - last_ts < 3.0:
+            return
+        _tts_click_guard[guard_key] = now
+        result = await db.execute(
+            select(JournalEntry)
+            .where(JournalEntry.id == entry_id)
+            .where(JournalEntry.user_id == user.id)
+            .where(JournalEntry.status == "ok")
+            .limit(1)
+        )
+        entry = result.scalar_one_or_none()
+        if not entry or not entry.final_diary_text:
+            await call.message.answer("Запись не найдена или недоступна.")
+            return
+
+        try:
+            audio = await synthesize(entry.final_diary_text, "ru")
+            await call.message.answer_voice(
+                BufferedInputFile(audio, filename=f"entry-{entry.id}.mp3"),
+                caption="🔊 Озвучка записи",
+            )
+        except Exception as e:
+            logger.error("TTS callback failed: %s", e, exc_info=True)
+            await call.message.answer("Не удалось озвучить запись.")
 
 
 @router.callback_query(F.data == "menu_back")
@@ -526,46 +636,36 @@ async def handle_voice(message: Message) -> None:
             await processing_msg.edit_text("⚠️ Ошибка обработки. Попробуйте позже.")
             return
 
-    # Processed logic
+    # Processed logic — split into unlimited Telegram messages (4096 cap each)
     parts = _split_for_telegram(result["text"])
-    sent_msg = None
-    
-    # Add Edit button if we have an entry_id
+
     entry_id = result.get("entry_id")
     kb = None
     if entry_id:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_entry:{entry_id}")
-        ]])
+        kb = build_entry_actions_kb(str(entry_id))
 
     try:
-        # Edit the "Processing..." message
-        if len(parts) == 1:
-            sent_msg = await processing_msg.edit_text(parts[0], parse_mode=ParseMode.HTML, reply_markup=kb)
-        else:
-            # If multiple parts, send split. Button on last one?
-            # edit_text only edits the processing message.
-            sent_msg = await processing_msg.edit_text(parts[0], parse_mode=ParseMode.HTML)
-            # Send other parts
-            for i, part in enumerate(parts[1:]):
-                try:
-                    markup = kb if i == len(parts) - 2 else None # last part index in list
-                    m = await message.answer(part, parse_mode=ParseMode.HTML, reply_markup=markup)
-                    if markup: sent_msg = m # track the one with button
-                except Exception:
-                    await message.answer(part)
+        await deliver_diary_chunks_to_chat(
+            parts=parts,
+            reply_markup=kb,
+            processing_msg=processing_msg,
+        )
     except Exception as e:
-        logger.error(f"HTML error: {e}")
-        sent_msg = await processing_msg.edit_text(parts[0], reply_markup=kb if len(parts)==1 else None)
-    
-    # Save bot_message_id for editing later
-    if sent_msg and entry_id:
+        logger.error("Deliver diary (voice) failed: %s", e, exc_info=True)
+        try:
+            await processing_msg.edit_text("⚠️ Произошла непредвиденная ошибка при отправке результата.")
+        except Exception:
+            pass
+        return
+
+    # Anchor for WebApp / admin edit = first bubble (same message_id as "processing")
+    if entry_id:
         async with async_session() as db_up:
             from sqlalchemy import update
             await db_up.execute(
                 update(JournalEntry)
                 .where(JournalEntry.id == entry_id)
-                .values(bot_message_id=sent_msg.message_id)
+                .values(bot_message_id=processing_msg.message_id)
             )
             await db_up.commit()
 
@@ -655,116 +755,35 @@ async def handle_text(message: Message) -> None:
             return
 
     parts = _split_for_telegram(result["text"])
-    sent_msg = None
-    
-    # Add Edit button if we have an entry_id (same as voice)
+
     entry_id = result.get("entry_id")
     kb = None
     if entry_id:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_entry:{entry_id}")
-        ]])
+        kb = build_entry_actions_kb(str(entry_id))
 
     try:
-        sent_msg = await processing_msg.edit_text(parts[0], parse_mode=ParseMode.HTML, reply_markup=kb if len(parts)==1 else None)
-    except Exception:
-        sent_msg = await processing_msg.edit_text(parts[0], reply_markup=kb if len(parts)==1 else None)
-    
-    # Save bot_message_id for editing later
-    if sent_msg and entry_id:
+        await deliver_diary_chunks_to_chat(
+            parts=parts,
+            reply_markup=kb,
+            processing_msg=processing_msg,
+        )
+    except Exception as e:
+        logger.error("Deliver diary (text) failed: %s", e, exc_info=True)
+        try:
+            await processing_msg.edit_text("⚠️ Произошла непредвиденная ошибка при отправке результата.")
+        except Exception:
+            pass
+        return
+
+    if entry_id:
         async with async_session() as db_up:
             from sqlalchemy import update
             await db_up.execute(
                 update(JournalEntry)
                 .where(JournalEntry.id == entry_id)
-                .values(bot_message_id=sent_msg.message_id)
+                .values(bot_message_id=processing_msg.message_id)
             )
             await db_up.commit()
-            
-    # Send remaining parts
-    for i, part in enumerate(parts[1:]):
-        # Attach button to the very last part if multi-part
-        markup = kb if i == len(parts) - 2 else None
-        await message.answer(part, parse_mode=ParseMode.HTML, reply_markup=markup)
-
-@router.callback_query(F.data.startswith("edit_entry:"))
-async def cb_edit_entry_start(call: CallbackQuery, state: FSMContext):
-    entry_id = call.data.split(":")[1]
-    
-    # Verify ownership
-    async with async_session() as db:
-        from app.db.models import JournalEntry
-        from sqlalchemy import and_
-        user = await _ensure_user(db, call)
-        
-        result = await db.execute(select(JournalEntry).where(
-            and_(JournalEntry.id == entry_id, JournalEntry.user_id == user.id)
-        ))
-        entry = result.scalar_one_or_none()
-        
-        if not entry:
-            await call.answer("❌ Запись не найдена или недоступна.", show_alert=True)
-            return
-
-    await state.set_state(UserStates.editing_entry)
-    await state.update_data(entry_id=entry_id, msg_id=call.message.message_id)
-    
-    await call.message.answer(
-        "✏️ <b>Режим редактирования</b>\n\n"
-        "Отправь мне новый текст для этой записи. Он полностью заменит текущий вариант.\n"
-        "<i>Напиши 'отмена', чтобы выйти.</i>",
-        parse_mode=ParseMode.HTML
-    )
-    await call.answer()
-
-@router.message(UserStates.editing_entry)
-async def process_edit_entry_text(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
-    
-    if text.lower() == "отмена":
-        await state.clear()
-        await message.answer("❌ Редактирование отменено.")
-        return
-
-    data = await state.get_data()
-    entry_id = data.get("entry_id")
-    msg_id = data.get("msg_id")
-
-    if not entry_id:
-        await state.clear()
-        return
-
-    async with async_session() as db:
-        user = await _ensure_user(db, message)
-        
-        # Update DB
-        from sqlalchemy import update
-        from app.db.models import JournalEntry
-        
-        await db.execute(
-            update(JournalEntry)
-            .where(JournalEntry.id == entry_id)
-            .values(final_diary_text=text)
-        )
-        await db.commit()
-        
-        # Update original message if possible
-        try:
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"edit_entry:{entry_id}")
-            ]])
-            await message.bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=msg_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb
-            )
-        except Exception as e:
-            logger.warning(f"Could not edit original message: {e}")
-
-    await message.answer("✅ <b>Запись обновлена!</b>", parse_mode=ParseMode.HTML)
-    await state.clear()
 
 
 

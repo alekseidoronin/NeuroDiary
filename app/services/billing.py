@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Optional
+from typing import Optional, Any
 from uuid import UUID
 
 from sqlalchemy import select, func
@@ -16,6 +16,68 @@ from app.config import settings
 from app.db.models import UsageDaily, Subscription, Plan, User
 
 logger = logging.getLogger(__name__)
+
+
+def _to_int(value: Any, default: int) -> int:
+    """Safe int conversion with fallback."""
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _normalize_user_limit_overrides(raw: Any) -> dict[str, int]:
+    """
+    Normalize user limit overrides with backward compatibility.
+    Supported keys:
+      - entries_per_day (preferred)
+      - stt_seconds_per_day (preferred)
+      - entries_count (legacy)
+      - stt_seconds (legacy)
+    """
+    if not isinstance(raw, dict):
+        return {}
+
+    out: dict[str, int] = {}
+    entries_val = raw.get("entries_per_day", raw.get("entries_count"))
+    stt_val = raw.get("stt_seconds_per_day", raw.get("stt_seconds"))
+
+    if entries_val is not None:
+        out["entries_per_day"] = _to_int(entries_val, 0)
+    if stt_val is not None:
+        out["stt_seconds_per_day"] = _to_int(stt_val, 0)
+    return out
+
+
+def resolve_effective_limits(user: User, plan_limits: dict[str, Any]) -> dict[str, Any]:
+    """
+    Resolve effective limits and source with a single priority chain:
+      1) user.limit_overrides
+      2) plan/global limits passed in plan_limits
+    Returns diagnostics for UI/logging.
+    """
+    base_entries = _to_int(plan_limits.get("entries_per_day", 5), 5)
+    base_stt = _to_int(plan_limits.get("stt_seconds_per_day", 600), 600)
+
+    normalized = _normalize_user_limit_overrides(user.limit_overrides)
+    if normalized:
+        max_entries = _to_int(normalized.get("entries_per_day"), base_entries)
+        max_stt = _to_int(normalized.get("stt_seconds_per_day"), base_stt)
+        source = "user_override"
+    else:
+        max_entries = base_entries
+        max_stt = base_stt
+        source = "plan_or_default"
+
+    return {
+        "entries_per_day": max_entries,
+        "stt_seconds_per_day": max_stt,
+        "entries_unlimited": max_entries < 0,
+        "stt_unlimited": max_stt < 0,
+        "source": source,
+    }
 
 
 async def check_limits(db: AsyncSession, user: User) -> dict:
@@ -69,32 +131,38 @@ async def check_limits(db: AsyncSession, user: User) -> dict:
     total_entries = row[0] or 0
     total_stt = row[1] or 0
 
-    # Define limits
-    # Priority 1: Admin Overrides
-    if user.limit_overrides and isinstance(user.limit_overrides, dict):
-        max_entries = int(user.limit_overrides.get("entries_count", limits.get("entries_per_day", 5)))
-        max_stt = int(user.limit_overrides.get("stt_seconds", limits.get("stt_seconds_per_day", 600)))
-    else:
-        # Priority 2: Plan limits
-        max_entries = limits.get("entries_per_day", 5)
-        max_stt = limits.get("stt_seconds_per_day", 600)
+    effective = resolve_effective_limits(user, limits)
+    max_entries = effective["entries_per_day"]
+    max_stt = effective["stt_seconds_per_day"]
+    entries_unlimited = effective["entries_unlimited"]
+    stt_unlimited = effective["stt_unlimited"]
 
     # Check limits
-    if total_entries >= max_entries:
+    if (not entries_unlimited) and total_entries >= max_entries:
         return {
             "allowed": False,
             "reason": f"Лимит пробного периода исчерпан ({total_entries}/{max_entries} записей).",
             "plan": plan_name,
+            "source": effective["source"],
+            "effective_limits": effective,
         }
 
-    if total_stt >= max_stt:
+    if (not stt_unlimited) and total_stt >= max_stt:
         return {
             "allowed": False,
             "reason": f"Лимит пробного периода исчерпан ({int(total_stt/60)}/{int(max_stt/60)} мин).",
             "plan": plan_name,
+            "source": effective["source"],
+            "effective_limits": effective,
         }
 
-    return {"allowed": True, "reason": None, "plan": plan_name}
+    return {
+        "allowed": True,
+        "reason": None,
+        "plan": plan_name,
+        "source": effective["source"],
+        "effective_limits": effective,
+    }
 
 
 async def increment_usage(

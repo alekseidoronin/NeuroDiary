@@ -27,10 +27,32 @@ from app.db.models import (
     AffiliateRecord,
 )
 from app.config import settings
+from app.services.billing import resolve_effective_limits
+from app.services.telegram_ui import build_entry_actions_kb
 
 logger = logging.getLogger(__name__)
 
 admin_router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def _normalize_limit_payload(data: dict) -> dict:
+    """
+    Normalize limits payload coming from admin UI.
+    Supports both legacy and preferred keys.
+    Empty values remove corresponding override key.
+    """
+    if not isinstance(data, dict):
+        return {}
+
+    normalized: dict[str, int] = {}
+    raw_entries = data.get("entries_per_day", data.get("entries_count"))
+    raw_stt = data.get("stt_seconds_per_day", data.get("stt_seconds"))
+
+    if raw_entries not in (None, ""):
+        normalized["entries_per_day"] = int(raw_entries)
+    if raw_stt not in (None, ""):
+        normalized["stt_seconds_per_day"] = int(raw_stt)
+    return normalized
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -377,6 +399,26 @@ async def get_user(
                 "tokens": 0
             })
 
+    # Resolve effective limits for UI/read-after-write consistency
+    sub_q = (
+        select(Subscription, Plan)
+        .join(Plan, Subscription.plan_id == Plan.id)
+        .where(Subscription.user_id == user_id)
+        .where(Subscription.status.in_(["trial", "active"]))
+        .order_by(Subscription.created_at.desc())
+        .limit(1)
+    )
+    sub_row = (await db.execute(sub_q)).first()
+    if sub_row:
+        _, plan = sub_row
+        base_limits = plan.limits_json or {}
+    else:
+        base_limits = {
+            "entries_per_day": settings.TRIAL_ENTRIES_PER_DAY,
+            "stt_seconds_per_day": settings.TRIAL_STT_SECONDS_PER_DAY,
+        }
+    effective_limits = resolve_effective_limits(user, base_limits)
+
     return {
         "user": {
             "id": str(user.id),
@@ -391,6 +433,7 @@ async def get_user(
             "first_seen_at": user.first_seen_at.isoformat() if user.first_seen_at else None,
             "balance": float(user.balance or 0),
             "limit_overrides": user.limit_overrides,
+            "effective_limits": effective_limits,
             "weekly_summary_enabled": user.weekly_summary_enabled,
             "total_cost_usd": total_cost_usd,
         },
@@ -409,6 +452,7 @@ async def get_user(
             for e in events
         ],
         "activity_history": history_data,
+        "history": history_data,  # backward compatibility for existing UI
     }
 
 
@@ -481,11 +525,48 @@ async def update_user_limits(
     if not user:
         raise HTTPException(404, "User not found")
 
+    normalized = _normalize_limit_payload(data)
     from sqlalchemy.orm.attributes import flag_modified
-    user.limit_overrides = data
+    user.limit_overrides = normalized
     flag_modified(user, "limit_overrides")
+    await log_event(db, "admin_setting_changed", admin.id, {
+        "target_user_id": str(user.id),
+        "setting": "limit_overrides",
+        "value": normalized,
+    })
     await db.commit()
-    return {"status": "ok"}
+
+    # Read-after-write: return effective applied values
+    sub_q = (
+        select(Subscription, Plan)
+        .join(Plan, Subscription.plan_id == Plan.id)
+        .where(Subscription.user_id == user_id)
+        .where(Subscription.status.in_(["trial", "active"]))
+        .order_by(Subscription.created_at.desc())
+        .limit(1)
+    )
+    sub_row = (await db.execute(sub_q)).first()
+    if sub_row:
+        _, plan = sub_row
+        base_limits = plan.limits_json or {}
+    else:
+        base_limits = {
+            "entries_per_day": settings.TRIAL_ENTRIES_PER_DAY,
+            "stt_seconds_per_day": settings.TRIAL_STT_SECONDS_PER_DAY,
+        }
+    effective_limits = resolve_effective_limits(user, base_limits)
+    await log_event(db, "setting_effective_applied", admin.id, {
+        "target_user_id": str(user.id),
+        "setting": "limit_overrides",
+        "effective": effective_limits,
+    })
+    await db.commit()
+
+    return {
+        "status": "ok",
+        "limit_overrides": user.limit_overrides or {},
+        "effective_limits": effective_limits,
+    }
 
 
 # ── Entries ──────────────────────────────────────────────────
@@ -619,22 +700,27 @@ async def update_entry(
 
     await db.commit()
 
-    # If text changed and we have bot_message_id, try to edit in Telegram
+    # If text changed and we have bot_message_id, sync Telegram (split into as many messages as needed)
     if "text" in data and data["text"] != old_text and entry.bot_message_id:
         from app.core.bot import bot
-        from aiogram.enums import ParseMode
+        from app.api.webhook import deliver_diary_chunks_to_chat
+        from app.services.telegram_chunk import split_for_telegram
+
         result_user = await db.execute(select(User).where(User.id == entry.user_id))
         user = result_user.scalar_one_or_none()
         if user and user.tg_user_id:
             try:
-                await bot.edit_message_text(
+                kb = build_entry_actions_kb(str(entry.id))
+                parts = split_for_telegram(entry.final_diary_text or "")
+                await deliver_diary_chunks_to_chat(
+                    bot=bot,
                     chat_id=user.tg_user_id,
-                    message_id=entry.bot_message_id,
-                    text=entry.final_diary_text,
-                    parse_mode=ParseMode.HTML
+                    parts=parts,
+                    reply_markup=kb,
+                    edit_message_id=entry.bot_message_id,
                 )
             except Exception as e:
-                logger.warning(f"Failed to edit TG message: {e}")
+                logger.warning("Failed to deliver TG message after admin edit: %s", e)
 
     return {"status": "ok"}
 
@@ -829,14 +915,28 @@ async def get_settings(
     for k in keys:
         s = db_settings.get(k)
         if s:
-            out[k] = {
-                "value": s.value if not s.is_secret else "********",
-                "is_secret": s.is_secret,
-                "version": s.version,
-                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
-            }
-        else:
-            # Get default from code
+            # For secrets, check if the decrypted value is non-empty
+            if s.is_secret:
+                from app.services.crypto import decrypt_value
+                decrypted = decrypt_value(s.encrypted_value) if s.encrypted_value else ""
+                is_saved = bool(decrypted)
+            else:
+                is_saved = bool(s.value)
+
+            if is_saved:
+                out[k] = {
+                    "value": "********" if s.is_secret else s.value,
+                    "is_secret": s.is_secret,
+                    "is_saved": True,
+                    "version": s.version,
+                    "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                }
+            else:
+                # Row exists but value is empty — treat as not set
+                s = None
+
+        if not s:
+            # Get default from code/env
             default_val = "********"
             if k == "stt_provider": default_val = cfg.STT_PROVIDER
             elif k == "llm_provider": default_val = cfg.LLM_PROVIDER
@@ -844,10 +944,10 @@ async def get_settings(
             elif k == "system_prompt": default_val = SYSTEM_PROMPT
             elif k == "user_template": default_val = USER_TEMPLATE
             elif k == "repair_prompt": default_val = REPAIR_PROMPT
-            
+
             out[k] = {
                 "value": default_val,
-                "is_secret": k.endswith("_key"),
+                "is_secret": k.endswith("_key") or k.endswith("_token") or k.endswith("_secret"),
                 "is_default": True,
             }
 
@@ -861,16 +961,32 @@ async def update_providers(
     admin: User = Depends(get_admin_user),
 ):
     """Update STT/LLM provider selection and model."""
-    allowed = [
+    allowed = {
         "stt_provider", "llm_provider", "llm_model",
         "trial_entries_per_day", "trial_stt_seconds_per_day",
-        "llm_temperature", "llm_max_tokens"
-    ]
-    for key in allowed:
-        if key in data:
-            await _upsert_setting(db, key, str(data[key]), admin.id)
+        "llm_temperature", "llm_max_tokens",
+    }
+    payload = {k: v for k, v in data.items() if k in allowed}
+    if "llm_provider" in payload and payload["llm_provider"] not in {"gemini", "openai"}:
+        raise HTTPException(400, "llm_provider must be one of: gemini, openai")
+    if "stt_provider" in payload and payload["stt_provider"] not in {"assemblyai"}:
+        raise HTTPException(400, "stt_provider must be one of: assemblyai")
+    if "llm_temperature" in payload:
+        t = float(payload["llm_temperature"])
+        if t < 0 or t > 1:
+            raise HTTPException(400, "llm_temperature must be between 0 and 1")
+    if "llm_max_tokens" in payload and int(payload["llm_max_tokens"]) <= 0:
+        raise HTTPException(400, "llm_max_tokens must be > 0")
+
+    for key, value in payload.items():
+        await _upsert_setting(db, key, str(value), admin.id)
+
+    await log_event(db, "admin_setting_changed", admin.id, {
+        "setting_group": "providers",
+        "payload": payload,
+    })
     await db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "applied": payload}
 
 
 @admin_router.post("/settings/secrets")
@@ -880,11 +996,74 @@ async def update_secrets(
     admin: User = Depends(get_admin_user),
 ):
     """Update API keys (stored encrypted)."""
+    updated: dict[str, str] = {}
     for key in ["assemblyai_api_key", "openai_api_key", "gemini_api_key"]:
         if key in data and data[key]:
             await _upsert_setting(db, key, data[key], admin.id, is_secret=True)
+            updated[key] = "saved"
+
+    await log_event(db, "admin_setting_changed", admin.id, {
+        "setting_group": "secrets",
+        "updated_keys": list(updated.keys()),
+    })
     await db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "updated": updated}
+
+
+@admin_router.post("/settings/test-key")
+async def test_api_key(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(get_admin_user),
+):
+    """Test whether an API key is valid by making a minimal request."""
+    provider = data.get("provider")
+    key = data.get("key", "").strip()
+    if not key:
+        raise HTTPException(400, "key is required")
+
+    if provider == "gemini":
+        try:
+            from google import genai as _genai
+            client = _genai.Client(api_key=key)
+            response = await client.aio.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents="Hi"
+            )
+            return {"status": "ok", "provider": "gemini", "model": "gemini-2.0-flash-lite", "response": response.text[:50]}
+        except Exception as e:
+            return {"status": "error", "provider": "gemini", "error": str(e)}
+
+    if provider == "openai":
+        try:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=key)
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+            )
+            return {"status": "ok", "provider": "openai", "response": response.choices[0].message.content}
+        except Exception as e:
+            return {"status": "error", "provider": "openai", "error": str(e)}
+
+    if provider == "assemblyai":
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    "https://api.assemblyai.com/v2/account",
+                    headers={"Authorization": key},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    return {"status": "ok", "provider": "assemblyai"}
+                else:
+                    return {"status": "error", "provider": "assemblyai", "error": f"HTTP {r.status_code}"}
+        except Exception as e:
+            return {"status": "error", "provider": "assemblyai", "error": str(e)}
+
+    raise HTTPException(400, f"Unknown provider: {provider}")
 
 
 @admin_router.post("/settings/prompts")
@@ -894,11 +1073,17 @@ async def update_prompts(
     admin: User = Depends(get_admin_user),
 ):
     """Update system/user/repair prompts."""
+    updated: list[str] = []
     for key in ["system_prompt", "user_template", "repair_prompt"]:
         if key in data:
             await _upsert_setting(db, key, data[key], admin.id)
+            updated.append(key)
+    await log_event(db, "admin_setting_changed", admin.id, {
+        "setting_group": "prompts",
+        "updated_keys": updated,
+    })
     await db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "updated": updated}
 
 
 # ── Plans ────────────────────────────────────────────────────
@@ -947,8 +1132,31 @@ async def upsert_plan(
     plan.limits_json = data.get("limits", {})
     plan.is_active = data.get("is_active", True)
 
+    await log_event(db, "admin_setting_changed", admin.id, {
+        "setting_group": "plans",
+        "plan_code": plan.code,
+        "payload": {
+            "name": plan.name,
+            "price": float(plan.price) if plan.price is not None else 0.0,
+            "currency": plan.currency,
+            "limits": plan.limits_json,
+            "is_active": plan.is_active,
+        },
+    })
     await db.commit()
-    return {"status": "ok", "plan_id": str(plan.id)}
+    await db.refresh(plan)
+    return {
+        "status": "ok",
+        "plan": {
+            "id": str(plan.id),
+            "code": plan.code,
+            "name": plan.name,
+            "price": float(plan.price) if plan.price else 0,
+            "currency": plan.currency,
+            "limits": plan.limits_json,
+            "is_active": plan.is_active,
+        },
+    }
 
 
 @admin_router.post("/settings/affiliate")
@@ -958,11 +1166,17 @@ async def update_affiliate_settings(
     admin: User = Depends(get_admin_user),
 ):
     """Update affiliate program settings."""
+    applied: dict[str, str] = {}
     for key in ["affiliate_commission_rate", "affiliate_min_withdrawal"]:
         if key in data:
             await _upsert_setting(db, key, str(data[key]), admin.id)
+            applied[key] = str(data[key])
+    await log_event(db, "admin_setting_changed", admin.id, {
+        "setting_group": "affiliate",
+        "payload": applied,
+    })
     await db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "applied": applied}
 
 
 @admin_router.post("/settings/payments")
@@ -972,11 +1186,17 @@ async def update_payment_settings(
     admin: User = Depends(get_admin_user),
 ):
     """Update payment gateway settings (secrets)."""
+    updated: list[str] = []
     for key in ["yoomoney_shop_id", "yoomoney_secret", "robokassa_merchant_id", "robokassa_password_1", "robokassa_password_2", "cryptobot_token"]:
         if key in data and data[key]:
             await _upsert_setting(db, key, data[key], admin.id, is_secret=True)
+            updated.append(key)
+    await log_event(db, "admin_setting_changed", admin.id, {
+        "setting_group": "payments",
+        "updated_keys": updated,
+    })
     await db.commit()
-    return {"status": "ok"}
+    return {"status": "ok", "updated": updated}
 @admin_router.get("/payments")
 async def list_payments(
     user_id: Optional[UUID] = Query(None),
